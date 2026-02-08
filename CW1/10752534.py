@@ -27,6 +27,7 @@ frame=[]
 previous_byte = b''
 frame_count = 0
 corrupt_count = 0
+first_timestamp = None
 
 while byte: # != b"", is not empty
     # print("Byte value is (hexidecimal): " + str(byte))
@@ -90,6 +91,10 @@ while byte: # != b"", is not empty
                              "P", rpm, vlt, crt, mos_tmp, cap_tmp,
                              "T", timestamp, checksum, ""])
 
+            # store the first timestamp for Q3
+            if first_timestamp is None:
+                first_timestamp = timestamp
+
             # print the index of frame and the frame as a list of integers
             print(f"frame N{frame_count}" + str(frame))
             frame_count += 1
@@ -107,8 +112,8 @@ while byte: # != b"", is not empty
 print("End of file reached")
 print(f"Q1: Total complete frames: {frame_count}")
 print(f"Q2: Corrupt frames: {corrupt_count}")
-# from timestamp in microseconds to datetime, then to calendar date in UTC
-print(f"Q3: Calendar date of messages: {datetime.fromtimestamp(1516061235195350 / 1_000_000, timezone.utc)}")
+# convert first timestamp from microseconds to a UTC datetime for the calendar date
+print(f"Q3: Calendar date of messages: {datetime.fromtimestamp(first_timestamp / 1_000_000, timezone.utc)}")
 input_file.close()
 output_file.close()
 

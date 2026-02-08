@@ -107,6 +107,7 @@ while byte: # != b"", is not empty
 print("End of file reached")
 print(f"Q1: Total complete frames: {frame_count}")
 print(f"Q2: Corrupt frames: {corrupt_count}")
+# from timestamp in microseconds to datetime, then to calendar date in UTC
 print(f"Q3: Calendar date of messages: {datetime.fromtimestamp(1516061235195350 / 1_000_000, timezone.utc)}")
 input_file.close()
 output_file.close()

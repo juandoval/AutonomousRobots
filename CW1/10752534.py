@@ -1,7 +1,7 @@
 #Start code
-#Q1 Answer: 587
-#Q2 Answer: 14
-#Q3 Answer: 16th January 2018
+#Q1 Answer, complete data frames: 587
+#Q2 Answer, corrupt messages: 14
+#Q3 Answer, calendar date of messages: 16th January 2018
 
 import csv
 from datetime import datetime, timezone

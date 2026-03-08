@@ -1,0 +1,32 @@
+CW2: Path Planning
+
+TLDR: upload  pathPlanner.py as your submission
+
+AIM: The aim of this task is to implement a path planning algorithm for a generalised robotic system.
+The ability for a vehicle to automatically plan a route though terrain can significantly enhance the capabilities
+and reliability of mobile robots by reducing the operator workload and allowing the robot to make ‘safe’ or
+‘efficient’ routing decisions based on its interpretation of the terrain or other hazards.
+
+Using the Python programming language, you will create an implementation of the A* path planning algorithm.
+A graphical user interface (GUI) has been created with an empty function which must be edited.
+The image below shows an example of what a basic implementation of A* might achieve.
+
+Submission
+
+The required submission a Python3 script function which implements the A* path planning algorithm as a 
+function within the user interface program provided. Commenting should be used to explain the steps of your method
+and good coding standards should be followed.
+
+IMPORTANT: This function must run! Any submissions which crash, have bugs, or otherwise cannot be downloaded and run within
+the GUI framework will not have marks assigned for a successful implementation or execution speed.
+
+Please upload only your edited version of the pathPlanner.py script to Canvas. If you decide to implement any advanced python
+functions and/or classes etc. They should all be contained within this single file.
+
+Marking scheme
+This coursework has a 15% contribution to the unit overall. Marks out of 20 will be awarded according to:
+
+Successful implementation - tested against idealised implementation and various test cases [10 marks]
+Explanation of the method used (in comments) [5 marks]
+Execution speed of code [2 marks]
+Good coding practices [3 marks]

@@ -20,9 +20,6 @@
 # distance which is always <= the true path length on a 4-directional grid, satisfying
 # admissibility.
 #
-# Motion model: 4-directional (up, down, left, right). Each move costs g(n) += 1.
-# Heuristic: Euclidean distance h(n) = sqrt((dx)^2 + (dy)^2)
-#
 # The main path planning function. Additional functions, classes,
 # variables, libraries, etc. can be added to the file, but this
 # function must always be defined with these arguments and must

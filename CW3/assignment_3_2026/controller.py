@@ -7,10 +7,36 @@ wind_flag = False
 # In practice the high Kd already provides strong velocity-proportional braking that
 # prevents overshoot, so the DOB activates only inside DOB_RADIUS metres of the target.
 
-from src.PID_controller import PIDController
+import csv
 import math
 import numpy as np
 import time
+
+
+class PIDController:
+    def __init__(self, Kp, Ki, Kd, Ki_sat):
+        self.Kp = Kp
+        self.Ki = Ki
+        self.Kd = Kd
+        self.Ki_sat = Ki_sat
+        self.previous_error = [0.0, 0.0, 0.0]
+        self.int = [0.0, 0.0, 0.0]
+
+    def reset(self):
+        self.int = [0.0, 0.0, 0.0]
+        self.previous_error = [0.0, 0.0, 0.0]
+
+    def control_update(self, error, timestep):
+        self.int += error * timestep
+        over_mag = np.argwhere(np.array(self.int) > np.array(self.Ki_sat))
+        if over_mag.size != 0:
+            for i in range(over_mag.size):
+                mag = abs(self.int[over_mag[i][0]])
+                self.int[over_mag[i][0]] = (self.int[over_mag[i][0]] / mag) * self.Ki_sat[over_mag[i][0]]
+        self.int = np.clip(self.int, -np.array(self.Ki_sat), np.array(self.Ki_sat))
+        derivative = (error - self.previous_error) / timestep
+        self.previous_error = error
+        return self.Kp * error + self.Ki * self.int + self.Kd * derivative
 
 # Position gains — Bayesian-optimised (commit 284f6d8)
 Kp_pos = np.array([1.8124, 1.8124, 1.8124])
@@ -30,7 +56,13 @@ YAW_LIMIT = 1.5
 
 pos_pid = PIDController(Kp=Kp_pos, Ki=Ki_pos, Kd=Kd_pos, Ki_sat=Ksat_pos)
 yaw_pid = PIDController(Kp=Kp_yaw, Ki=Ki_yaw, Kd=Kd_yaw, Ki_sat=Ksat_yaw)
+
 _print_timer = 0.0
+_log_timer   = 0.0
+_log_start   = time.time()
+_log_file    = open("pos_error_log.csv", "w", newline="")
+_log_writer  = csv.writer(_log_file)
+_log_writer.writerow(["time_s", "err_mag", "err_x", "err_y", "err_z"])
 
 def controller(state, target_pos, dt, wind_enabled=False):
     # state:      [pos_x, pos_y, pos_z, roll, pitch, yaw]  (metres, radians)
@@ -48,8 +80,19 @@ def controller(state, target_pos, dt, wind_enabled=False):
     pos_error = tgt_pos - cur_pos
     vel_world = pos_pid.control_update(pos_error, dt)
 
-    global _print_timer
+    global _print_timer, _log_timer, _log_start
     _print_timer += dt
+    _log_timer   += dt
+
+    if _log_timer >= 0.1:
+        _log_timer = 0.0
+        t = round(time.time() - _log_start, 3)
+        _log_writer.writerow([t, round(float(np.linalg.norm(pos_error)), 6),
+                               round(float(pos_error[0]), 6),
+                               round(float(pos_error[1]), 6),
+                               round(float(pos_error[2]), 6)])
+        _log_file.flush()
+
     if _print_timer >= 0.5:
         _print_timer = 0.0
         print(f"[{time.strftime('%H:%M:%S')}] pos_err: {np.linalg.norm(pos_error):.4f} m  ({pos_error[0]:.3f}, {pos_error[1]:.3f}, {pos_error[2]:.3f})")

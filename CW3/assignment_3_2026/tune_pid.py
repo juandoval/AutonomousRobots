@@ -24,9 +24,18 @@ from src.wind import Wind
 # ---------------------------------------------------------------------------
 SIM_HZ          = 1000          # physics steps per second
 CTRL_HZ         = 50            # position controller Hz
-SIM_SECONDS     = 10.0          # match professor's 10-second test window
-STEADY_SECONDS  = 3.0           # score only the last N seconds (steady state)
-TARGET          = (2.0, 2.0, 2.0, 0.0)    # furthest position target, no yaw — tune position first
+SIM_SECONDS     = 20.0          # 10s approach + 10s scoring, matches professor's test
+STEADY_SECONDS  = 10.0          # score the last 10s (the measurement window)
+
+# Representative targets — covers far reach, 3-D diagonal, and yaw demand
+# Averaged to get gains that generalise across the 50-trial marking sweep
+EVAL_TARGETS = [
+    (4.0,  0.0,  1.0, 0.0 ),   # far lateral, no yaw
+    (2.0,  2.0,  2.0, 0.0 ),   # 3-D diagonal
+    (1.0, -1.0,  0.5, 1.57),   # short target with large yaw demand
+]
+
+TARGET = EVAL_TARGETS[0]   # kept for backward-compat with --yaw-only branch
 
 DRONE_URDF      = "resources/tello.urdf"
 START_POS       = [0, 0, 1]
@@ -42,10 +51,12 @@ TM  = 0.0163
 # ---------------------------------------------------------------------------
 # One headless simulation trial
 # ---------------------------------------------------------------------------
-def run_trial(kp, ki, kd, kp_yaw, ki_yaw, kd_yaw, ki_sat=1.0, verbose=False, gui=False, target_override=None):
+def run_trial(kp, ki, kd, kp_yaw, ki_yaw, kd_yaw, ki_sat=1.0, dob_bw=3.0,
+              verbose=False, gui=False, target_override=None, wind_enabled=True,
+              wind_seed=42):
     """
-    Run a headless PyBullet simulation with the given position and yaw PID gains.
-    Returns the mean combined error (position + yaw) over the last STEADY_SECONDS.
+    Run a headless PyBullet simulation with the given position/yaw PID gains and
+    DOB bandwidth.  Returns the mean combined error over the last STEADY_SECONDS.
     """
     physics_client = p.connect(p.GUI if gui else p.DIRECT)
     p.setAdditionalSearchPath(pybullet_data.getDataPath(), physicsClientId=physics_client)
@@ -73,6 +84,10 @@ def run_trial(kp, ki, kd, kp_yaw, ki_yaw, kd_yaw, ki_sat=1.0, verbose=False, gui
 
     tello = TelloController(9.81, M, L, 0.35, KF, KM)
 
+    import random as _random
+    _random.seed(wind_seed)
+    wind_sim = Wind(max_steady_state=0.02, max_gust=0.02, k_gusts=0.1) if wind_enabled else None
+
     timestep      = 1.0 / SIM_HZ
     ctrl_timestep = 1.0 / CTRL_HZ
     steps_per_ctrl = int(round(ctrl_timestep / timestep))
@@ -81,6 +96,12 @@ def run_trial(kp, ki, kd, kp_yaw, ki_yaw, kd_yaw, ki_sat=1.0, verbose=False, gui
 
     VEL_LIMIT = 3.5
     YAW_LIMIT = 1.5
+
+    # DOB state (mirrors controller.py)
+    dob_prev_pos  = None
+    dob_d_hat     = np.zeros(3)
+    dob_prev_vcmd = np.zeros(3)
+    dob_alpha     = (2 * math.pi * dob_bw * ctrl_timestep) / (1 + 2 * math.pi * dob_bw * ctrl_timestep)
 
     prev_rpm     = np.zeros(4)
     desired_vel  = np.zeros(3)
@@ -109,14 +130,28 @@ def run_trial(kp, ki, kd, kp_yaw, ki_yaw, kd_yaw, ki_sat=1.0, verbose=False, gui
         if loop_counter >= steps_per_ctrl:
             loop_counter = 0
 
-            # Position error
-            pos_error = np.array([tgt_x - pos[0],
-                                  tgt_y - pos[1],
-                                  tgt_z - pos[2]])
+            cur_pos = np.array(pos)
 
-            # Position PID → velocity command (world frame)
-            vel_world = pos_pid.control_update(pos_error, ctrl_timestep)
-            vel_world = np.clip(vel_world, -VEL_LIMIT, VEL_LIMIT)
+            # Position error
+            pos_error = np.array([tgt_x - cur_pos[0],
+                                  tgt_y - cur_pos[1],
+                                  tgt_z - cur_pos[2]])
+
+            # Nominal PD → velocity command (world frame)
+            vel_nom = pos_pid.control_update(pos_error, ctrl_timestep)
+
+            # DOB: estimate and cancel disturbance
+            if dob_prev_pos is not None:
+                v_est = (cur_pos - dob_prev_pos) / ctrl_timestep
+                d_raw = v_est - dob_prev_vcmd
+                if np.linalg.norm(d_raw) > 2.0:
+                    dob_d_hat[:] = 0.0
+                else:
+                    dob_d_hat[:] = dob_alpha * d_raw + (1 - dob_alpha) * dob_d_hat
+            dob_prev_pos = cur_pos.copy()
+
+            vel_world = np.clip(vel_nom - dob_d_hat, -VEL_LIMIT, VEL_LIMIT)
+            dob_prev_vcmd = vel_world.copy()
 
             # Yaw PID
             yaw_error = tgt_yaw - yaw
@@ -126,7 +161,10 @@ def run_trial(kp, ki, kd, kp_yaw, ki_yaw, kd_yaw, ki_sat=1.0, verbose=False, gui
                 -YAW_LIMIT, YAW_LIMIT
             ))
 
-            desired_vel = vel_world
+            # World → body frame (same rotation as controller.py)
+            vx_b = vel_world[0] * math.cos(yaw) + vel_world[1] * math.sin(yaw)
+            vy_b = -vel_world[0] * math.sin(yaw) + vel_world[1] * math.cos(yaw)
+            desired_vel = np.array([vx_b, vy_b, vel_world[2]])
 
             # Record error in steady-state window
             if step >= steady_start:
@@ -159,6 +197,10 @@ def run_trial(kp, ki, kd, kp_yaw, ki_yaw, kd_yaw, ki_sat=1.0, verbose=False, gui
                              p.LINK_FRAME, physicsClientId=physics_client)
         p.applyExternalTorque(drone_id, -1, torques.tolist(),
                               p.LINK_FRAME, physicsClientId=physics_client)
+        if wind_sim is not None:
+            wind_force = wind_sim.get_wind(timestep)
+            p.applyExternalForce(drone_id, -1, wind_force.tolist(), list(pos),
+                                 p.WORLD_FRAME, physicsClientId=physics_client)
         p.stepSimulation(physicsClientId=physics_client)
 
     p.disconnect(physics_client)
@@ -173,174 +215,137 @@ def run_trial(kp, ki, kd, kp_yaw, ki_yaw, kd_yaw, ki_sat=1.0, verbose=False, gui
 
 
 # ---------------------------------------------------------------------------
-# Bayesian optimisation
+# Objective: average score across all eval targets (with wind)
 # ---------------------------------------------------------------------------
-def main():
-    parser = argparse.ArgumentParser()
-    parser.add_argument("--plot", action="store_true", help="Show convergence plot after optimisation")
-    parser.add_argument("--n-calls", type=int, default=100, help="Total BO evaluations (default 100)")
-    parser.add_argument("--yaw-only", action="store_true",
-                        help="Fix pos gains from best_gains.json and only tune yaw gains. "
-                             "Uses a 90-deg yaw target so yaw error is meaningful.")
-    args = parser.parse_args()
+_trial_count = [0]
 
-    try:
-        from skopt import gp_minimize
-        from skopt.space import Real
-        from skopt.utils import use_named_args
-    except ImportError:
-        print("ERROR: scikit-optimize not installed. Run:  pip install scikit-optimize")
-        return
+def objective(params):
+    kp, ki, kd, kp_yaw, ki_yaw, kd_yaw, dob_bw = params
 
-    if args.yaw_only:
-        # Load fixed position gains
-        try:
-            with open("best_gains.json") as f:
-                saved = json.load(f)
-        except FileNotFoundError:
-            print("ERROR: best_gains.json not found. Run without --yaw-only first.")
-            return
-        fixed_kp  = saved["kp"]
-        fixed_ki  = saved["ki"]
-        fixed_kd  = saved["kd"]
+    # Hard bounds — reject out-of-range params (Nelder-Mead can wander)
+    # Kp lower bound = 0.6 ensures settling to 0.01m in <10s for any 4m target
+    LB = np.array([0.6, 0.0,  0.0, 0.5, 0.0,  0.0,  0.5])
+    UB = np.array([1.0, 0.05, 0.8, 5.0, 0.05, 0.5, 10.0])
+    if np.any(params < LB) or np.any(params > UB):
+        return 9999.0
 
-        # Use a 90-degree yaw target so the yaw controller must actually work
-        yaw_target = (TARGET[0], TARGET[1], TARGET[2], 0.5)  # ~28 deg — large enough to matter, small enough not to destabilise position
+    _trial_count[0] += 1
+    print(f"Trial {_trial_count[0]:3d}  "
+          f"kp={kp:.3f} ki={ki:.4f} kd={kd:.3f}  "
+          f"kp_yaw={kp_yaw:.3f} ki_yaw={ki_yaw:.4f} kd_yaw={kd_yaw:.3f}  "
+          f"dob_bw={dob_bw:.2f}", end="  ")
 
-        space = [
-            Real(0.1, 5.0,  name="kp_yaw"),
-            Real(0.0, 0.05, name="ki_yaw"),
-            Real(0.0, 0.5,  name="kd_yaw"),
-        ]
+    scores = [
+        run_trial(kp, ki, kd, kp_yaw, ki_yaw, kd_yaw, dob_bw=dob_bw,
+                  wind_enabled=True, wind_seed=42 + i,
+                  target_override=tgt, verbose=False)
+        for i, tgt in enumerate(EVAL_TARGETS)
+    ]
+    score = float(np.mean(scores))
+    print(f"→ {score:.4f}  {[f'{s:.4f}' for s in scores]}")
+    return score
 
-        call_count = [0]
 
-        @use_named_args(space)
-        def objective(kp_yaw, ki_yaw, kd_yaw):
-            call_count[0] += 1
-            print(f"Trial {call_count[0]:3d}  "
-                  f"kp_yaw={kp_yaw:.3f} ki_yaw={ki_yaw:.4f} kd_yaw={kd_yaw:.3f}", end="  ")
-            score = run_trial(fixed_kp, fixed_ki, fixed_kd, kp_yaw, ki_yaw, kd_yaw,
-                              verbose=False, target_override=yaw_target)
-            print(f"→ {score:.4f}")
-            return score
-
-        print("=" * 55)
-        print("Yaw-only BO — pos gains fixed, target:", yaw_target)
-        print(f"  Fixed pos: kp={fixed_kp:.4f} ki={fixed_ki:.4f} kd={fixed_kd:.4f}")
-        print("=" * 55)
-
-        result = gp_minimize(
-            func=objective,
-            dimensions=space,
-            n_calls=args.n_calls,
-            n_initial_points=10,
-            acq_func="EI",
-            random_state=42,
-            verbose=False,
-        )
-
-        best_kp_yaw, best_ki_yaw, best_kd_yaw = result.x
-        best_kp, best_ki, best_kd = fixed_kp, fixed_ki, fixed_kd
-
-    else:
-        yaw_target = TARGET
-
-        # Search space: position gains + yaw gains
-        # NOTE: kp/kd upper bounds widened — previous run hit the boundary at 2.0/0.5
-        # ki bounds kept narrow — trials show ki≈0 consistently wins
-        space = [
-            Real(0.1, 5.0,  name="kp"),
-            Real(0.0, 0.05, name="ki"),
-            Real(0.0, 1.5,  name="kd"),
-            Real(0.1, 5.0,  name="kp_yaw"),
-            Real(0.0, 0.05, name="ki_yaw"),
-            Real(0.0, 0.5,  name="kd_yaw"),
-        ]
-
-        call_count = [0]
-
-        @use_named_args(space)
-        def objective(kp, ki, kd, kp_yaw, ki_yaw, kd_yaw):
-            call_count[0] += 1
-            print(f"Trial {call_count[0]:3d}  "
-                  f"kp={kp:.3f} ki={ki:.4f} kd={kd:.3f}  "
-                  f"kp_yaw={kp_yaw:.3f} ki_yaw={ki_yaw:.4f} kd_yaw={kd_yaw:.3f}", end="  ")
-            score = run_trial(kp, ki, kd, kp_yaw, ki_yaw, kd_yaw, verbose=False)
-            print(f"→ {score:.4f}")
-            return score
-
-        print("=" * 55)
-        print("Bayesian PID optimisation — target:", TARGET)
-        print("=" * 55)
-
-        result = gp_minimize(
-            func=objective,
-            dimensions=space,
-            n_calls=args.n_calls,
-            n_initial_points=20,
-            acq_func="EI",
-            random_state=42,
-            verbose=False,
-        )
-
-        best_kp, best_ki, best_kd, best_kp_yaw, best_ki_yaw, best_kd_yaw = result.x
-
+def print_results(best_params, best_score):
+    kp, ki, kd, kp_yaw, ki_yaw, kd_yaw, dob_bw = best_params
     print("\n" + "=" * 55)
-    print(f"BEST gains found (score={result.fun:.4f}):")
-    print(f"  Pos  Kp={best_kp:.4f}  Ki={best_ki:.4f}  Kd={best_kd:.4f}")
-    print(f"  Yaw  Kp={best_kp_yaw:.4f}  Ki={best_ki_yaw:.4f}  Kd={best_kd_yaw:.4f}")
+    print(f"BEST gains found (score={best_score:.4f}):")
+    print(f"  Pos  Kp={kp:.4f}  Ki={ki:.4f}  Kd={kd:.4f}")
+    print(f"  Yaw  Kp={kp_yaw:.4f}  Ki={ki_yaw:.4f}  Kd={kd_yaw:.4f}")
+    print(f"  DOB  bandwidth={dob_bw:.4f} Hz")
     print("=" * 55)
     print("\nPaste these into controller.py:")
-    print(f"Kp_pos   = np.array([{best_kp:.4f}, {best_kp:.4f}, {best_kp:.4f}])")
-    print(f"Ki_pos   = np.array([{best_ki:.4f}, {best_ki:.4f}, {best_ki:.4f}])")
-    print(f"Kd_pos   = np.array([{best_kd:.4f}, {best_kd:.4f}, {best_kd:.4f}])")
-    print(f"Kp_yaw   = np.array([{best_kp_yaw:.4f}, 0.0, 0.0])")
-    print(f"Ki_yaw   = np.array([{best_ki_yaw:.4f}, 0.0, 0.0])")
-    print(f"Kd_yaw   = np.array([{best_kd_yaw:.4f}, 0.0, 0.0])")
-
-    # Save best gains to JSON for demo.py to load
+    print(f"Kp_pos        = np.array([{kp:.4f}, {kp:.4f}, {kp:.4f}])")
+    print(f"Ki_pos        = np.array([{ki:.4f}, {ki:.4f}, {ki:.4f}])")
+    print(f"Kd_pos        = np.array([{kd:.4f}, {kd:.4f}, {kd:.4f}])")
+    print(f"Kp_yaw        = np.array([{kp_yaw:.4f}, 0.0, 0.0])")
+    print(f"Ki_yaw        = np.array([{ki_yaw:.4f}, 0.0, 0.0])")
+    print(f"Kd_yaw        = np.array([{kd_yaw:.4f}, 0.0, 0.0])")
+    print(f"DOB_BANDWIDTH = {dob_bw:.4f}")
     gains = {
-        "kp": best_kp, "ki": best_ki, "kd": best_kd,
-        "kp_yaw": best_kp_yaw, "ki_yaw": best_ki_yaw, "kd_yaw": best_kd_yaw,
-        "score": result.fun,
+        "kp": kp, "ki": ki, "kd": kd,
+        "kp_yaw": kp_yaw, "ki_yaw": ki_yaw, "kd_yaw": kd_yaw,
+        "dob_bw": dob_bw, "score": best_score,
     }
     with open("best_gains.json", "w") as f:
         json.dump(gains, f, indent=2)
     print("\nSaved to best_gains.json")
+    print("\nVerifying across all targets:")
+    for i, tgt in enumerate(EVAL_TARGETS):
+        print(f"  Target {i+1} {tgt}:", end="")
+        run_trial(kp, ki, kd, kp_yaw, ki_yaw, kd_yaw, dob_bw=dob_bw,
+                  wind_enabled=True, wind_seed=42 + i,
+                  verbose=True, target_override=tgt)
 
-    # Verify
-    print("\nVerifying best gains...")
-    run_trial(best_kp, best_ki, best_kd, best_kp_yaw, best_ki_yaw, best_kd_yaw,
-              verbose=True, target_override=yaw_target)
 
-    if args.plot:
-        import matplotlib.pyplot as plt
-        from skopt.plots import plot_convergence, plot_objective
+# ---------------------------------------------------------------------------
+# Optimisation — Nelder-Mead (scipy) with random-search fallback
+# ---------------------------------------------------------------------------
+def tune_nelder_mead(x0, max_iter):
+    """Nelder-Mead simplex: fast, no extra libraries beyond scipy."""
+    from scipy.optimize import minimize
+    print("=" * 55)
+    print("Nelder-Mead simplex optimisation (scipy)")
+    print("=" * 55)
+    res = minimize(objective, x0, method="Nelder-Mead",
+                   options={"maxiter": max_iter, "xatol": 1e-3, "fatol": 1e-4,
+                            "disp": True, "adaptive": True})
+    return res.x, res.fun
 
-        # Convergence curve
-        plot_convergence(result)
-        plt.tight_layout()
-        plt.savefig("bo_convergence.png", dpi=150)
-        print("Convergence plot saved to bo_convergence.png")
 
-        # Response surfaces — GP's learned objective landscape
-        # Shows how score changes across each pair of gains (others fixed at optimum)
-        fig = plot_objective(result, n_points=20)
-        plt.suptitle("Response surfaces — GP surrogate objective", y=1.01)
-        plt.savefig("bo_response_surfaces.png", dpi=150, bbox_inches="tight")
-        print("Response surfaces saved to bo_response_surfaces.png")
+def tune_random_search(n_trials, rng):
+    """Pure-numpy random search — no extra libraries needed."""
+    print("=" * 55)
+    print(f"Random search — {n_trials} trials (numpy only)")
+    print("=" * 55)
+    # Search bounds:  kp   ki     kd   kp_y  ki_y   kd_y  dob_bw
+    LB = np.array([0.6, 0.0,  0.0,  0.5,  0.0,  0.0,  0.5])
+    UB = np.array([1.0, 0.05, 0.8,  5.0,  0.05, 0.5, 10.0])
+    best_score = 9999.0
+    best_params = (LB + UB) / 2
+    for _ in range(n_trials):
+        params = rng.uniform(LB, UB)
+        score = objective(params)
+        if score < best_score:
+            best_score = score
+            best_params = params.copy()
+    return best_params, best_score
 
-        plt.show()
+
+def main():
+    parser = argparse.ArgumentParser(
+        description="Tune DOB+PID gains for the Tello controller. "
+                    "Uses Nelder-Mead (scipy) if available, otherwise random search.")
+    parser.add_argument("--n-iter", type=int, default=200,
+                        help="Max iterations / trials (default 200)")
+    parser.add_argument("--random-only", action="store_true",
+                        help="Force random search even if scipy is available")
+    args = parser.parse_args()
+
+    # Starting point: analytically safe values (Kp<VEL_LIMIT/4m, no saturation)
+    x0 = np.array([0.80, 0.00, 0.25, 2.50, 0.01, 0.05, 2.0])
+    #               kp    ki    kd   kp_y  ki_y  kd_y  dob_bw
+
+    rng = np.random.default_rng(42)
+
+    if args.random_only:
+        best_params, best_score = tune_random_search(args.n_iter, rng)
+    else:
+        try:
+            from scipy.optimize import minimize as _scipy_minimize
+            del _scipy_minimize
+            best_params, best_score = tune_nelder_mead(x0, args.n_iter)
+        except ImportError:
+            print("scipy not found — falling back to random search")
+            best_params, best_score = tune_random_search(args.n_iter, rng)
+
+    print_results(best_params, best_score)
 
 
 if __name__ == "__main__":
     main()
 
-# EXAMPLE USE:
-#   python tune_pid.py --n-calls 50
-#   python tune_pid.py --n-calls 200 --plot
-
-# OUTPUT 
-#   best_gains.json
-#   bo_convergence.png
+# USAGE:
+#   python tune_pid.py                    # Nelder-Mead if scipy available, else random
+#   python tune_pid.py --n-iter 500       # more iterations
+#   python tune_pid.py --random-only      # force random search

@@ -41,7 +41,8 @@ class PIDController:
 # Position gains — Bayesian-optimised (commit 284f6d8)
 Kp_pos = np.array([1.8124, 1.8124, 1.8124])
 Ki_pos = np.array([0.0000, 0.0000, 0.0000])
-Kd_pos = np.array([1.2355, 1.2355, 1.2355])
+Kd_pos = np.array([0.800, 0.800, 0.800])
+# Kd_pos = np.array([1.2355, 1.2355, 1.2355])
 
 # Yaw gains
 Kp_yaw = np.array([2.50, 0.0, 0.0])
@@ -51,7 +52,7 @@ Kd_yaw = np.array([0.05, 0.0, 0.0])
 Ksat_pos = np.array([1.0, 1.0, 1.0])
 Ksat_yaw = np.array([0.5, 0.0, 0.0])
 
-VEL_LIMIT = 3.5
+VEL_LIMIT = 3.5 #0.3 
 YAW_LIMIT = 1.5
 
 pos_pid = PIDController(Kp=Kp_pos, Ki=Ki_pos, Kd=Kd_pos, Ki_sat=Ksat_pos)

@@ -2,7 +2,6 @@ import numpy as np
 import pybullet as p
 from src.PID_controller import PIDController
 
-
 class TelloController:
     def __init__(self, g, mass, L, max_angle, KF, KM):
         self.g = g

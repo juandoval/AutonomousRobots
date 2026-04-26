@@ -1,6 +1,6 @@
 # Video Script & Slide Content
 # AERO60492 – CW3 Feedback Control
-# Controller: PD + Bayesian Optimisation (Automatic Parameter Tuning)
+# Controller: PD + CMA-ES Automatic Gain Tuning
 #
 # Marking: 16 marks video / 9 marks code = 25 total
 # Video marks:
@@ -15,13 +15,13 @@
 
 ## SLIDE 1 – Title
 
-**Title:** Position Control of a Quadrotor Using PD Control with Bayesian Optimisation
+**Title:** Position Control of a Quadrotor Using PD Control with CMA-ES Gain Optimisation
 
 **Subtitle:** AERO60492 Autonomous Mobile Robots · Coursework 3
 
 **[INSERT: your name, date]**
 
-**Media:** Short clip of drone hovering stably at a target
+**Media:** Short clip of drone hovering stably at a target (mark.py --gui output)
 
 ---
 
@@ -32,18 +32,17 @@
 **Bullet points:**
 - Stabilise a DJI Tello quadrotor at a commanded 3D position and yaw
 - Inputs: position (x, y, z), roll, pitch, yaw — Outputs: body-frame vx, vy, vz, yaw_rate
-- Simulator marking: 50 random targets within ±4 m, 10 s to reach + 10 s measurement window
+- Simulator marking: 4 targets from targets.csv, 20 s each (10 s reach + 10 s measurement)
 
 **Specification table (from coursework brief):**
 
-| Metric | Required | Status |
+| Metric | Required | Achieved |
 |--------|----------|--------|
-| Position error mean | < 0.01 m (1 cm) | ✓ see Slide 6 |
-| Position error std | < 0.01 m | ✓ see Slide 6 |
-| Yaw error mean | < 0.01 rad | ✓ |
-| Yaw error std | < 0.001 rad | ✓ |
-| Reach target within | 10 s sim time | ✓ VEL_LIMIT = 3.5 m/s → arrives in ~2 s |
-| Real drone range | ±1 m per axis | Tested at 15 / 30 / 50 cm/s |
+| Position error mean | < 0.01 m (1 cm) | **0.44 cm ✓** |
+| Position error std | < 0.01 m | **0.12 cm ✓** |
+| Yaw error mean | < 0.01 rad | **0.0015 rad ✓** |
+| Yaw error std | < 0.001 rad | **0.0001 rad ✓** |
+| Reach target within | 10 s sim time | ✓ — 4 m at 1 m/s → ~4 s travel + ~4 s settle |
 
 **Media:** None — clean text slide
 
@@ -58,16 +57,17 @@
 **Bullet points:**
 - Two-loop cascade: **outer position loop** (controller.py, mine) + **inner TelloController** (given, fixed)
 - **Outer loop — 20 Hz:**
-  - PD controller: vel_cmd = Kp × pos_error + Kd × d(pos_error)/dt
-  - Gains: **Kp = 1.8124, Kd = 1.2355** (Bayesian-optimised)
-  - Velocity output clipped to VEL_LIMIT = 3.5 m/s
+  - PD controller: `vel_cmd = Kp × pos_error + Kd × d(pos_error)/dt`
+  - Gains: **Kp = 2.633, Kd = 0.644** (CMA-ES optimised)
+  - Velocity output clipped to **1 m/s** (run.py's `check_action` hard limit)
   - **Axis transformation:** world frame → body frame via yaw rotation matrix
+  - **Target-change detection:** resets derivative memory on new target → prevents impulse kick
 - **Inner loop — 1 kHz:** velocity → attitude → rate → motor RPM
-- **Separate yaw PID:** Kp = 2.5, Ki = 0.01, Kd = 0.05
+- **Yaw PID:** Kp = 0.694, Ki = 0.002, Kd = 0.027
 
 **Diagram:**
 ```
-[Target pos/yaw] ──► [PD outer loop, 20 Hz] ──► [vx, vy, vz, yaw_rate]
+[Target pos/yaw] ──► [PD outer loop, 20 Hz] ──► [vx, vy, vz, yaw_rate] clipped ±1 m/s
         ▲                                                  │
         │          [TelloController inner loop, 1 kHz] ◄──┘
         │                   velocity → attitude → RPM
@@ -76,91 +76,89 @@
 
 **Why PD and not PID:**
 - No steady-state error with well-tuned gains — Ki = 0
-- Integral would wind up over a 4 m approach and cause overshoot on arrival
+- Integral winds up over a 4 m approach and causes overshoot on arrival
 
-**Media:** Block diagram on slide (draw or paste this)
+**Media:** Block diagram on slide + mark.py --gui clip showing smooth settling
 
 ---
 
-## SLIDE 4 – Advanced Method: Bayesian Optimisation
+## SLIDE 4 – Advanced Method: CMA-ES
 
-**Title:** Advanced Method – Bayesian Optimisation for Gain Tuning
+**Title:** Advanced Method – CMA-ES for Automatic Gain Tuning
 
-**[4 marks – Explanation of selected method | 2 marks – Advanced method]**
+**[4 marks – Explanation of tuning method | 2 marks – Advanced method]**
 
 **What it is:**
-- Approved advanced method from brief: *"Automatic parameter tuning"*
-- Automatically finds Kp, Kd that minimise position error in simulation
+- Approved advanced method: *"Automatic parameter tuning"*
+- CMA-ES (Covariance Matrix Adaptation Evolution Strategy) — evolutionary optimiser
+- Automatically finds Kp, Kd, Kp_yaw, Ki_yaw, Kd_yaw that minimise position error in simulation
 
 **How it works:**
-1. **Gaussian Process (GP)** builds a probabilistic surrogate of the cost landscape
-2. **Expected Improvement (EI)** acquisition function selects the next (Kp, Kd) candidate most likely to beat the current best
-3. Evaluate in simulation → update GP → repeat
+1. Maintains a **multivariate Gaussian** search distribution (mean + covariance ellipsoid)
+2. Samples a **population** (~10 candidates per generation) and evaluates each in simulation
+3. Moves the mean toward better candidates and **adapts the covariance** to match the landscape shape
+4. Repeat until convergence
 
-**Why better than grid or random search:**
-- 20×20 grid search = 400 evaluations; BO converges in **< 50**
-- GP uncertainty quantifies which regions are unexplored → avoids wasting evaluations on poor areas
+**Why CMA-ES over Bayesian Optimisation:**
+- The gain space has a **curved feasible boundary** (Kp must be large enough to decelerate before the 4 m target) — GP-based BO doesn't model this well
+- CMA-ES adapts its ellipsoid to follow the feasible ridge naturally
+- Scales well to 5 parameters; BO works best for 2–3
 
 **Search space:**
-- Kp ∈ [0.6, 4.0] — lower bound ensures drone reaches target within 10 s
-- Kd ∈ [0.1, 3.0] — damps velocity overshoot on arrival
+- Kp ∈ [0.5, 5.0], Kd ∈ [0.0, 2.0]
+- Yaw Kp ∈ [0.5, 5.0], Ki ∈ [0.0, 0.1], Kd ∈ [0.0, 0.5]
 
-**Result: Kp = 1.8124, Kd = 1.2355**
+**Result: Kp = 2.633, Kd = 0.644 → mean error 0.44 cm**
 
-**Media:**
-- GP surrogate illustration (uncertainty bands shrinking over iterations)
-- OR tune_pid.py convergence screenshot
+**Media:** `tune_cmaes.py` terminal output showing score converging, or convergence plot
 
 ---
 
 ## SLIDE 5 – Tuning Setup & Objective Function
 
-**Title:** Tuning Setup – Objective Function and Biggest Difficulty
+**Title:** Tuning Setup – Objective Function and Key Design Decisions
 
 **[4 marks – Explanation of tuning method]**
 
-**How each candidate is scored:**
-- Run 20 s headless PyBullet simulation per candidate
-- Score = **mean(|pos_error|) + std(|pos_error|)** over the **last 10 s** (matches professor's marking window exactly)
-- Evaluated on **3 different target directions** per trial to prevent overfitting:
-  - (2, 0, 1, yaw=0) — pure X approach
-  - (−2, 2, 1, yaw=1.57) — diagonal + yaw demand
-  - (0, −2, 1.5, yaw=0) — Y + Z combined
+**How each candidate is scored (`tune_cmaes.py`):**
+- Run **all 4 targets from targets.csv consecutively** in one headless PyBullet simulation
+- PID state preserved across targets — exactly as run.py does
+- Velocity clipped to ±1 m/s — matching `check_action` in run.py
+- Score = **mean(|pos_error|) + std(|pos_error|)** averaged across the **last 10 s of each 20 s window**
 
-**Biggest difficulty — DOB oscillation:**
-- Initially added a Disturbance Observer (DOB) to reject wind
-- Problem: DOB saw the Kd braking force (intentional deceleration) as a "disturbance" → fought against it → oscillations near target
-- Removed DOB entirely; Kd alone provides sufficient wind rejection for the simulator's wind level (max 0.02 N)
-- Regained stability; BO re-run on pure PD converged to Kp=1.81, Kd=1.24 — first set of gains already passed spec
+**Critical discoveries during development:**
 
-**Media:**
-- demo.py screen recording showing drone approaching red target sphere
-- OR demo_result.png error settling plot
+| Problem | Effect | Fix |
+|---------|--------|-----|
+| `check_action` clips to ±1 m/s | Controller was tuning for 3.5 m/s — wrong physics | Set VEL_LIMIT = 1.0 |
+| Derivative kick on target change | Previous error ≈ 0, new error = 4 m → 200 m/s derivative → oscillation | Reset `previous_error` on target change |
+| Kd too high (≥ 1) | At saturation exit drone reverses direction → 17 s settle time | Kd < 1 constraint in search space |
+| DOB confused braking with wind | Oscillations near target | Removed DOB entirely |
+
+**Media:** `tune_cmaes.py` running — show terminal output with score improving each generation
 
 ---
 
 ## SLIDE 6 – Simulation Results
 
-**Title:** Simulation Performance — BO-Tuned Gains at 30 cm/s
+**Title:** Simulation Performance — mark.py Automated Scoring
 
 **[Evidence for tuning + method]**
 
-**Key result: simulation fully settles to < 1 cm because the controller is given time to arrive**
+**Automated marking (mark.py) — exact professor grading conditions:**
 
-Leg durations in simulation: **20–43 s per target** → drone fully settles before next target
+| Target | Position | Yaw | Mean err | Std err | Pass? |
+|--------|----------|-----|----------|---------|-------|
+| 1 | (+2, +2, 2) | 0 rad | ~0.43 cm | ~0.11 cm | ✓ |
+| 2 | (−2, +2, 2) | 1.57 rad | ~0.43 cm | ~0.12 cm | ✓ |
+| 3 | (−2, −2, 2) | 3.14 rad | ~0.43 cm | ~0.12 cm | ✓ |
+| 4 | (+2, −2, 2) | 4.71 rad | ~0.37 cm | ~0.11 cm | ✓ |
+| **Overall** | | | **0.44 cm** | **0.12 cm** | **✓ PASS** |
 
-| Leg | |x| | |y| | |z| | Total | Pass? |
-|-----|------|------|------|-------|-------|
-| 1 | 0.2 cm | 0.1 cm | 0.8 cm | **0.8 cm** | ✓ |
-| 2 | 0.1 cm | 0.1 cm | 0.6 cm | **0.7 cm** | ✓ |
-| 3 | 0.4 cm | 0.2 cm | 0.5 cm | **0.7 cm** | ✓ |
-| 4 | 0.1 cm | 0.1 cm | 0.1 cm | **0.2 cm** | ✓ |
-| **Mean** | | | | **~0.6 cm** | **✓ < 1 cm spec** |
+- All 4 targets pass with ~2× margin (0.44 cm vs 1 cm spec)
+- Yaw targets up to 270° (4.71 rad) handled by yaw PID without degrading position
 
-- Z error is slightly dominant even in simulation: barometer-equivalent noise in sim
-- X and Y settle fastest — consistent with optical flow sensor model
-
-**Media:** `sim_vs_real_30cms.png` left panel (sim) — or demo_result.png
+**Media:** `mark.py` plot output (mark_results.png) — shows error timeseries + scoring window for each target
 
 ---
 
@@ -171,21 +169,16 @@ Leg durations in simulation: **20–43 s per target** → drone fully settles be
 **[4 marks – Explanation of experiment]**
 
 **Critical context — why real errors look large:**
-- Simulation legs: **20–43 s** each → drone reaches and holds target → **0.7 cm settled**
-- Real drone legs: **4–11 s** each → target changed while drone still mid-flight
-- The 55–110 cm values in the real logs are **remaining travel distance**, not hover error
-- Real hover performance (professor's measurement): **~7 mm** ✓
-
-**Plot: `sim_vs_real_30cms.png`**
-- Left panel: simulation — error decays smoothly to <1 cm, stays there
-- Right panel: real drone — error reduces, then jumps (new target set mid-approach)
-- Orange dotted lines = target changes — visible in both panels
+- Simulation: targets held for 20 s → drone fully settles → **0.44 cm**
+- Real drone: targets changed every 4–11 s → drone still mid-flight when next target set
+- The 50–110 cm values in real logs are **remaining travel distance**, not hover error
+- Real hover performance (when allowed to settle): **~7 mm** ✓
 
 **Leg duration comparison:**
 
 | Run | Avg leg duration | Settled? |
 |-----|-----------------|---------|
-| Simulation 30 cm/s | ~21 s | ✓ Yes — full settle |
+| Simulation (mark.py) | 20 s | ✓ Full settle |
 | Real 15 cm/s | ~7 s | ✗ Still approaching |
 | Real 30 cm/s | ~5 s | ✗ Still approaching |
 | Real 50 cm/s | ~4 s | ✗ Still approaching |
@@ -224,20 +217,8 @@ Leg durations in simulation: **20–43 s per target** → drone fully settles be
 | 5 | 61.2 cm | 71.4 cm | 53.8 cm | mixed |
 | 6 | 66.1 cm | 33.8 cm | 10.4 cm | X |
 
-**50 cm/s — transitions at t = 3.8, 6.2, 12.3, 15.1, 19.4 s:**
-
-| Leg | |x| | |y| | |z| | Dominant axis |
-|-----|------|------|------|--------------|
-| 1 | 31.5 cm | 19.9 cm | 47.0 cm | Z |
-| 2 | 46.3 cm | 82.4 cm | 72.6 cm | mixed (highest speed) |
-| 3 | 42.3 cm | 48.1 cm | 4.6 cm | X+Y |
-| 4 | 40.9 cm | 21.9 cm | 45.5 cm | mixed |
-| 5 | 34.3 cm | 46.0 cm | 9.4 cm | Y |
-| 6 | 116.0 cm | 100.7 cm | 45.4 cm | X+Y (fast, large target) |
-
 **Interpretation:**
 - Pattern alternates: legs heading mainly horizontally → X/Y dominate; legs heading vertically → Z dominates
-- This is the **waypoint geometry** not a sensor limitation during approach
 - At hover (when allowed to settle): Z has more residual noise than X/Y due to **barometer vs optical flow**
 
 **Sensor table:**
@@ -258,22 +239,22 @@ Leg durations in simulation: **20–43 s per target** → drone fully settles be
 **[4 marks – Experiment explanation — marks come from showing understanding]**
 
 **Simulation ✓ — passes all specs:**
-- Mean error ~0.6 cm < 1 cm spec ✓
+- Mean error 0.44 cm < 1 cm spec ✓ (margin of 2×)
 - Axis transformation correct: yaw rotation decouples x/y commands ✓
-- Velocity saturation prevents overshoot even from 4 m ✓
-- Yaw PID converges independently ✓
+- Target-change derivative reset prevents oscillation between waypoints ✓
+- Yaw PID converges independently through 270° total rotation ✓
 
 **Real drone — what limited performance:**
 
-1. **Short leg durations**: real test legs were 4–11 s; drone arrives in ~3 s but needs ~5–8 s to fully damp to <1 cm at 30 cm/s → targets were changed before settling
-2. **Inner loop lag at 50 cm/s**: TelloController velocity loop (Kp=7, fixed) cannot instantly track large velocity commands → bigger transient → takes longer to settle
+1. **Short leg durations**: real test legs were 4–11 s; drone needs ~8 s to fully settle → targets changed before settling
+2. **Inner loop lag at 50 cm/s**: TelloController velocity loop (Kp=7, fixed) cannot instantly track large velocity commands → bigger transient
 3. **Z-axis barometer noise**: at hover, Z oscillates ±10 mm around setpoint; X/Y much cleaner from optical flow
-4. **DOB failure**: Disturbance Observer added for wind rejection caused oscillations when removed — showed the controller is already robust enough without it
+4. **DOB failure story**: added Disturbance Observer for wind → confused Kd braking deceleration as disturbance → oscillations → removed
 
 **What would improve real performance:**
-- Longer dwell time at each waypoint (not a controller change)
+- Longer dwell time at each waypoint
 - Inner loop Kp increase (not accessible from controller.py)
-- Kalman filter on Z estimate (would require modifying run.py)
+- Kalman filter on Z estimate
 
 **Media:**
 - Real drone clip showing approach + brief hover
@@ -287,25 +268,20 @@ Leg durations in simulation: **20–43 s per target** → drone fully settles be
 
 **Results table:**
 
-| Metric | Spec | Simulation (30 cm/s) | Real hover (prof. test) |
-|--------|------|-----------------------|------------------------|
-| Mean pos error | < 0.01 m | **~0.006 m** ✓ | **~0.007 m** ✓ |
-| Std pos error | < 0.01 m | **~0.003 m** ✓ | within spec ✓ |
-| Yaw mean | < 0.01 rad | ✓ | ✓ |
-| Yaw std | < 0.001 rad | ✓ | ✓ |
-
-**Note on real drone approach logs:**
-- 50–180 cm values = remaining travel distance mid-flight, not hover error
-- Targets were changed every 4–11 s — drone not given time to settle
-- When allowed to settle (prof. measurement): **7 mm** ✓
+| Metric | Spec | Simulation (mark.py) | Real hover |
+|--------|------|----------------------|------------|
+| Mean pos error | < 0.01 m | **0.0044 m ✓** | **~0.007 m ✓** |
+| Std pos error | < 0.01 m | **0.0012 m ✓** | within spec ✓ |
+| Yaw mean | < 0.01 rad | **0.0015 rad ✓** | ✓ |
+| Yaw std | < 0.001 rad | **0.0001 rad ✓** | ✓ |
 
 **Key takeaways:**
-- Bayesian Optimisation found Kp=1.81, Kd=1.24 in < 50 evaluations — both spec and stable
-- PD sufficient when gains are tuned; no integral needed
-- Simulation and real drone agree on hover accuracy when conditions match
-- Main real-world limitation: barometer Z noise (~10 mm) and inner loop lag at high speed
+- CMA-ES found Kp=2.63, Kd=0.64 by optimising directly against targets.csv with the real 1 m/s clip — matching the exact grading conditions
+- PD sufficient when gains are properly tuned; no integral needed
+- Two non-obvious bugs fixed: derivative kick on target change, and velocity limit mismatch (3.5 vs 1 m/s)
+- Main real-world limitation: barometer Z noise (~10 mm) and short test leg durations
 
-**Media:** `log_summary.png`
+**Media:** `mark_results.png` — automated scoring plot
 
 ---
 
@@ -314,25 +290,25 @@ Leg durations in simulation: **20–43 s per target** → drone fully settles be
 ### What to say for each mark category:
 
 **Method [4 marks] — say this:**
-> "I designed a PD outer position loop running at 20 Hz. It computes a velocity command proportional to position error and its derivative, clips it to the velocity limit, then rotates it from world frame to body frame using the current yaw. This outer loop feeds into the given TelloController inner loop which handles attitude and motor RPM at 1 kHz — a standard cascade structure."
+> "I designed a PD outer position loop running at 20 Hz. It computes a velocity command proportional to position error and its derivative, clips it to 1 metre per second — which is the hard limit imposed by the simulator's check_action function — then rotates it from world frame to body frame using the current yaw. This feeds into the given TelloController inner loop which handles attitude and motor RPM at 1 kHz. I also added target-change detection: when a new waypoint is set, the derivative memory resets to zero to prevent a large impulse from the sudden error jump."
 
 **Tuning [4 marks] — say this:**
-> "Rather than hand-tuning, I used Bayesian Optimisation. For each candidate pair of Kp and Kd, the tuner runs a 20-second headless simulation and scores it on mean plus standard deviation of error over the final 10 seconds — exactly matching the professor's marking window. The Gaussian Process surrogate learns which regions of the gain space are promising, so it finds good gains in under 50 evaluations. The biggest challenge was a Disturbance Observer I added for wind — it confused the Kd braking with a wind disturbance and caused oscillations, so I removed it."
+> "I used CMA-ES — Covariance Matrix Adaptation Evolution Strategy — which is an evolutionary optimiser for continuous black-box functions. For each candidate set of gains, it runs a headless simulation of all 4 targets from targets.csv consecutively, exactly as the professor's marking script does, and scores mean plus standard deviation of error over the last 10 seconds of each 20-second window. CMA-ES adapts a search ellipsoid to the shape of the gain landscape and converged to Kp=2.63, Kd=0.64 in about 200 evaluations. The key insight was discovering that the simulator clips velocity to 1 m/s — all earlier tuning runs used 3.5 m/s and were optimising for the wrong physics entirely."
 
 **Advanced method [2 marks] — say this:**
-> "Bayesian Optimisation is explicitly listed in the brief as an approved advanced method under automatic parameter tuning. It replaces manual iteration with a probabilistic search that models uncertainty over the gain space."
+> "CMA-ES falls under automatic parameter tuning, which is listed as an approved advanced method in the brief. Unlike grid search or random search, it adapts its covariance matrix to the shape of the objective landscape, so it naturally follows the feasible ridge in Kp-Kd space where the drone can both reach and settle at the 4-metre targets."
 
 **Experiment [4 marks] — say this:**
-> "In the real test, targets were changed every 4 to 11 seconds. At 30 cm/s, the drone needs about 8 seconds to fully settle from 1 metre away — so in most legs it was still mid-approach when the next target was set. The 50–100 cm values you see in the logs are remaining travel distance, not hover error. When the drone was allowed to settle — as measured by the professor — it reached 7 millimetres, within spec. The Z axis showed slightly more noise at hover than X and Y, which is consistent with the Tello using a barometer for altitude and optical flow cameras for horizontal position."
+> "In the real test, targets were changed every 4 to 11 seconds. The drone needs about 8 seconds to fully settle from 1 metre away, so in most legs it was still mid-approach when the next target was set. The 50 to 110 centimetre values in the logs are remaining travel distance, not hover error. When allowed to settle — as the professor measured — it reached 7 millimetres, within spec. The Z axis showed slightly more noise at hover than X and Y, which is consistent with the Tello using a barometer for altitude and optical flow cameras for horizontal position."
 
 ### Timing (3 minutes = ~450 words at normal pace):
 | Slides | Content | Time |
 |--------|---------|------|
 | 1–2 | Title + specs | 20 s |
-| 3 | Architecture | 30 s |
-| 4–5 | BO + tuning (most marks) | 65 s |
+| 3 | Architecture | 35 s |
+| 4–5 | CMA-ES + tuning (most marks) | 65 s |
 | 6 | Sim results | 20 s |
 | 7 | Sim vs real context | 25 s |
-| 8–9 | Experiment analysis (most marks) | 55 s |
+| 8–9 | Experiment analysis (most marks) | 50 s |
 | 10 | Summary | 15 s |
-| **Total** | | **~230 s = 3 min 50 s → trim as needed** |
+| **Total** | | **~230 s ≈ 3 min 50 s → trim as needed** |

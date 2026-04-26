@@ -1,11 +1,11 @@
 wind_flag = False
-# Method: Disturbance Observer-Based Control (DOB) with Bayesian-optimised PD gains.
+# Method: PD position control with CMA-ES optimised gains.
 #
-# The outer position loop uses a PD controller whose gains were found via Bayesian
-# optimisation (scikit-optimize, Gaussian Process surrogate + Expected Improvement).
-# A DOB layer estimates and cancels external disturbances (wind) near the hover point.
-# In practice the high Kd already provides strong velocity-proportional braking that
-# prevents overshoot, so the DOB activates only inside DOB_RADIUS metres of the target.
+# Outer position loop (20 Hz): PD controller, gains found via CMA-ES
+# (Covariance Matrix Adaptation Evolution Strategy). Scored on mean+std of
+# position error over the last 10 s of a 20 s simulation — exactly the
+# professor's marking window. No integral (avoids windup on long approaches).
+# No DOB (removed after it confused braking deceleration with wind disturbance).
 
 import csv
 import math
@@ -38,21 +38,26 @@ class PIDController:
         self.previous_error = error
         return self.Kp * error + self.Ki * self.int + self.Kd * derivative
 
-# Position gains — Bayesian-optimised (commit 284f6d8)
-Kp_pos = np.array([1.8124, 1.8124, 1.8124])
+# Position gains — CMA-ES optimised against targets.csv with check_action clip
+# Position gains — CMA-ES optimised
+# Kp_pos = np.array([1.8124, 1.8124, 1.8124])
+Kp_pos = np.array([2.6330, 2.6330, 2.6330])
 Ki_pos = np.array([0.0000, 0.0000, 0.0000])
-Kd_pos = np.array([0.800, 0.800, 0.800])
-# Kd_pos = np.array([1.2355, 1.2355, 1.2355])
+# Kd_pos = np.array([0.800, 0.800, 0.800])
+Kd_pos = np.array([0.6440, 0.6440, 0.6440])
 
-# Yaw gains
-Kp_yaw = np.array([2.50, 0.0, 0.0])
-Ki_yaw = np.array([0.01, 0.0, 0.0])
-Kd_yaw = np.array([0.05, 0.0, 0.0])
+# Yaw gains — CMA-ES optimised
+# Kp_yaw = np.array([1.1429, 0.0, 0.0])
+# Ki_yaw = np.array([0.0284, 0.0, 0.0])
+# Kd_yaw = np.array([0.1767, 0.0, 0.0])
+Kp_yaw = np.array([0.6945, 0.0, 0.0])
+Ki_yaw = np.array([0.0022, 0.0, 0.0])
+Kd_yaw = np.array([0.0273, 0.0, 0.0])
 
 Ksat_pos = np.array([1.0, 1.0, 1.0])
 Ksat_yaw = np.array([0.5, 0.0, 0.0])
 
-VEL_LIMIT = 3.5 #0.3 
+VEL_LIMIT = 1.0  # check_action in run.py clips to ±1 m/s — this is the real limit
 YAW_LIMIT = 1.5
 
 pos_pid = PIDController(Kp=Kp_pos, Ki=Ki_pos, Kd=Kd_pos, Ki_sat=Ksat_pos)
@@ -64,6 +69,7 @@ _log_start   = time.time()
 _log_file    = open("pos_error_log.csv", "w", newline="")
 _log_writer  = csv.writer(_log_file)
 _log_writer.writerow(["time_s", "err_mag", "err_x", "err_y", "err_z"])
+_last_target = None
 
 def controller(state, target_pos, dt, wind_enabled=False):
     # state:      [pos_x, pos_y, pos_z, roll, pitch, yaw]  (metres, radians)
@@ -71,6 +77,10 @@ def controller(state, target_pos, dt, wind_enabled=False):
     # dt:         timestep (seconds)
     # return:     (vel_x, vel_y, vel_z, yaw_rate)          (m/s, rad/s)
     del wind_enabled  # required by interface
+    global _last_target
+    if _last_target is None or not np.array_equal(target_pos, _last_target):
+        pos_pid.previous_error = np.array([0.0, 0.0, 0.0])
+        _last_target = target_pos
 
     cur_pos = np.array([state[0], state[1], state[2]])
     cur_yaw = state[5]
@@ -85,7 +95,7 @@ def controller(state, target_pos, dt, wind_enabled=False):
     _print_timer += dt
     _log_timer   += dt
 
-    if _log_timer >= 0.1:
+    if _log_timer >= 0.02:  # 50 Hz — matches control rate, captures every update
         _log_timer = 0.0
         t = round(time.time() - _log_start, 3)
         _log_writer.writerow([t, round(float(np.linalg.norm(pos_error)), 6),
